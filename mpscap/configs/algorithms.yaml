@@ -1,0 +1,18 @@
+# 算法配置示例
+- name: CCA
+  modalities: [EEG]
+  driver: algorithms.cca.CCAAlgorithm
+  parameters:
+    harmonics: 3
+- name: EEGNet
+  modalities: [EEG]
+  driver: algorithms.eegnet.EEGNetAlgorithm
+  parameters:
+    pretrained: false
+- name: DeepConvNet
+  modalities: [EEG]
+  driver: algorithms.deepconv.DeepConvNetAlgorithm
+- name: PhyTransformer
+  modalities: [EEG, EMG]
+  driver: algorithms.phytransformer.PhyTransformerAlgorithm
+

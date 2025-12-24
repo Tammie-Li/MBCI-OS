@@ -1,0 +1,18 @@
+# 范式配置示例
+- name: SSVEP
+  modalities: [EEG]
+  parameters:
+    freq_list: [8, 10, 12, 15]
+- name: RSVP
+  modalities: [EEG]
+  parameters:
+    display_rate: 10
+- name: EMG_Gesture
+  modalities: [EMG]
+  parameters:
+    gesture_types: [fist, pinch]
+- name: Eye_Target
+  modalities: [EYE]
+  parameters:
+    dwell_time_ms: 800
+

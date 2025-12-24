@@ -1,0 +1,37 @@
+# 设备配置示例
+- id: neusense_w
+  name: 博瑞康 Neusen W
+  modality: EEG
+  driver: drivers.neusense.NeusenAdapter
+  sample_rate: 1024
+  channels: 32
+  transport: tcp
+- id: tobii_5
+  name: Tobii Eye Tracker 5
+  modality: EYE
+  driver: drivers.tobii.TobiiAdapter
+  sample_rate: 120
+  channels: 2
+  transport: usb
+- id: biosemi_active_two
+  name: Biosemi Active Two
+  modality: EEG
+  driver: drivers.biosemi.ActiveTwoAdapter
+  sample_rate: 2048
+  channels: 64
+  transport: ethernet
+- id: brain_products_vhdr
+  name: Brain Products GmbH
+  modality: EEG
+  driver: drivers.brainproducts.VhdrAdapter
+  sample_rate: 1000
+  channels: 32
+  transport: tcp
+- id: emg_wristband
+  name: 自研肌电腕带
+  modality: EMG
+  driver: drivers.custom.EmgWristbandAdapter
+  sample_rate: 2000
+  channels: 8
+  transport: ble
+
