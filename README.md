@@ -9,6 +9,9 @@
 - 数据解码与共享内存：驱动层解码 EMG/ACC/Glove 并写入共享内存，供 UI 实时读取。
 - Kafka 发布：可配置 Kafka 服务器，实时发布采集数据。
 - 模型训练示例：`scripts/train_emgnet.py` 演示基于 4 个数据文件的分类训练与实时可视化。
+- 采集界面触发显示：保存开始为 0s 计时，收到 trigger 闪现 2s，并在波形中以红线+标签标记触发位置。
+- 触发通路：默认共享内存，额外提供本地 UDP 备选（127.0.0.1:15000，可用环境变量 `MPSCAP_TRIGGER_UDP_PORT` 配置）。
+- 触发落盘：范式名自动写入触发文件名 `TRIGGER_<范式名>_<时间戳>.dat`，可用 `python scripts/read_trigger.py TRIGGER_xxx.dat` 查看非零触发与时间。
 
 ## 环境准备
 ```bash

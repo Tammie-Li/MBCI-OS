@@ -46,7 +46,8 @@ def run_ssvep_demo(trigger_com: Optional[str] = None, freqs: Optional[List[float
     frames = int(stim_time * refresh_hz)
 
     # 创建窗口
-    win = visual.Window(size=(1920, 1080), units="pix", color=(-1, -1, -1), fullscr=True, allowGUI=True)
+    # 改为窗口模式，1920x1080，避免全屏遮挡主界面
+    win = visual.Window(size=(1920, 1080), units="pix", color=(-1, -1, -1), fullscr=False, allowGUI=True)
 
     # 创建 4 个频闪方块
     positions = [(-400, 200), (400, 200), (-400, -200), (400, -200)]

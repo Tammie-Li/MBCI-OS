@@ -212,7 +212,8 @@ class DataDecoder:
             print(f"[ERROR] EMG={self.emgChs}, ACC={self.accChs}, Glove={self.gloveChs}, 总计={total_channels}")
             print(f"[ERROR] EMG shape={emgdataay.shape}, ACC shape={accdataay.shape}, Glove shape={glovedataay.shape}")
         else:
-            print(f"[DEBUG] 通道数正确: {alldataRwt.shape[1]}通道 (EMG={self.emgChs}, ACC={self.accChs}, Glove={self.gloveChs})")
+            pass
+            # print(f"[DEBUG] : {alldataRwt.shape[1]}通道 (EMG={self.emgChs}, ACC={self.accChs}, Glove={self.gloveChs})")
         
         # 发布到Kafka（如果已启用）
         if self.kafka_producer is not None:
@@ -271,16 +272,9 @@ class DataDecoder:
                 
                 self.file.write(ay.tobytes())  # 头信息
                 self.saveFlg = 1
-                # 触发文件（与数据文件同目录，后缀 .trig，int32）
-                try:
-                    import os
-                    from pathlib import Path
-                    trig_path = Path(pth).with_suffix(".trig")
-                    self.trig_file = open(trig_path, "wb")
-                    self.trig_path = str(trig_path)
-                except Exception:
-                    self.trig_file = None
-                    self.trig_path = None
+                # 不再保存 .trig 文件
+                self.trig_file = None
+                self.trig_path = None
         else:  # self.saveFlg == 1:
             if self.shm.getvalue('savedata') == 0:  # 结束保存
                 if self.file is not None:
@@ -299,21 +293,8 @@ class DataDecoder:
                 ay = np.hstack((alldataRwt, stamp)).astype(EEGTYPE).flatten()
                 if self.file is not None:
                     self.file.write(ay.tobytes())
-                # 触发文件写入（与stamp长度对齐，不足补0）
-                if self.trig_file is not None:
-                    try:
-                        trig_arr = np.array(self.triggers, dtype=np.int32).reshape(-1, 1)
-                        if trig_arr.shape[0] != stamp.shape[0]:
-                            # 对齐长度
-                            need = stamp.shape[0]
-                            if trig_arr.shape[0] < need:
-                                pad = np.zeros((need - trig_arr.shape[0], 1), dtype=np.int32)
-                                trig_arr = np.vstack([trig_arr, pad])
-                            else:
-                                trig_arr = trig_arr[:need]
-                        self.trig_file.write(trig_arr.astype(np.int32).tobytes())
-                    except Exception:
-                        pass
+                # 触发文件写入：绝对时间戳 + trigger（浮点写入，简化为两列 float64）
+                # 不写入 .trig
                 self.saveFlg = 1
         
         # 清空累积数据（参考datadecoder.py第197-208行）

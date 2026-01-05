@@ -5,8 +5,12 @@
 from __future__ import annotations
 
 import colorsys
+import os
+import socket
+import threading
 import time
 from collections import deque
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -445,6 +449,8 @@ class WavePanel(QtWidgets.QWidget):
         self._show_imu2 = False
         self._show_pressure = False
         self._show_bend = False
+        # 时间轴起点（秒），None 表示使用当前时间
+        self.time_origin: Optional[float] = None
 
     def relayout(self) -> None:
         """重新布局（参考eegdisplay.py/relayout）。"""
@@ -589,7 +595,24 @@ class WavePanel(QtWidgets.QWidget):
             # 更新显示（参考eegdisplay.py第212-214行），并根据可视化开关决定是否绘制
             if self.dm.data is None:
                 return
-            
+
+            x_vals = None
+            if self.localSrate > 0:
+                window_sec = self.dm.data.shape[1] / float(self.localSrate)
+            else:
+                window_sec = float(self.dm.data.shape[1])
+            now_t = time.time()
+            if self.time_origin is not None:
+                t_end = now_t - self.time_origin
+            else:
+                t_end = now_t
+            t_start = t_end - window_sec
+            try:
+                x_vals = np.linspace(t_start, t_end, self.dm.data.shape[1])
+                self.pgplot.setXRange(t_start, t_end, padding=0.0)
+            except Exception:
+                x_vals = None
+
             # 前 emgChsNum 条为 EMG，后面依次为 IMU/ACC 和 Glove
             totalChsNum = self.dm.data.shape[0]
             for id in range(totalChsNum):
@@ -619,7 +642,10 @@ class WavePanel(QtWidgets.QWidget):
                         visible = False
 
                 if visible:
-                    self.curves[id].setData(self.dm.data[id, :] * self.ygain)
+                    if x_vals is not None:
+                        self.curves[id].setData(x_vals, self.dm.data[id, :] * self.ygain)
+                    else:
+                        self.curves[id].setData(self.dm.data[id, :] * self.ygain)
                 else:
                     # 隐藏该通道（清空数据）
                     self.curves[id].setData([])
@@ -673,6 +699,10 @@ class WavePanel(QtWidgets.QWidget):
         self._show_pressure = pressure
         self._show_bend = bend
 
+    def set_time_origin(self, t0: Optional[float]) -> None:
+        """设置时间轴起点（秒），用于将 X 轴对齐到保存开始的相对时间。"""
+        self.time_origin = t0
+
     def release(self) -> None:
         """释放资源（参考eegdisplay.py/release）。"""
         self.startPloting(False)
@@ -687,6 +717,10 @@ class DataAcquisitionPage(QtWidgets.QWidget):
         self._devices: Dict[str, dict] = {}  # device_key -> {rda, panel, config, ...}
         # 数据保存相关状态（支持时序数据库和文件保存）
         self._saving: bool = False
+        self._auto_save_dir: Optional[Path] = None  # 若外部请求自动保存则使用此目录，跳过对话框
+        self._trigger_log: List[tuple] = []  # 记录触发值与相对时间（秒）
+        self._trigger_dat_path: Optional[Path] = None
+        self._save_ts_tag: Optional[str] = None
         self._tsdb_storage: Optional[TSDBStorage] = None
         self._session_id: Optional[str] = None
         self._storage_mode: str = "auto"  # "auto", "tsdb", "file"
@@ -695,6 +729,7 @@ class DataAcquisitionPage(QtWidgets.QWidget):
         self._emg_srate: float = 0.0
         self._et_srate: float = 33.0  # 眼动默认采样率（若可估计则动态更新）
         self._save_start_ts: float = 0.0
+        self._current_paradigm_name: Optional[str] = None
         # 通道数量快照（保存开始时确定，避免采集中途变化导致错位）
         self._emg_chs: int = 0
         self._acc_chs: int = 0
@@ -707,7 +742,16 @@ class DataAcquisitionPage(QtWidgets.QWidget):
         self._et_pending: Dict[object, deque] = {}
         self._et_buf_x: list[float] = []
         self._et_buf_y: list[float] = []
+        # trigger 提示
+        self._trigger_label: Optional[pg.TextItem] = None
+        # trigger UDP 监听（作为共享内存的备选，默认 127.0.0.1:15000，可用环境变量 MPSCAP_TRIGGER_UDP_PORT 配置）
+        self._trigger_udp_port: int = int(os.environ.get("MPSCAP_TRIGGER_UDP_PORT", "15000") or 15000)
+        self._trigger_udp_queue: deque = deque(maxlen=256)
+        self._trigger_udp_stop: threading.Event = threading.Event()
+        self._trigger_udp_thread: Optional[threading.Thread] = None
+        self._trigger_udp_socket: Optional[socket.socket] = None
         self._init_ui()
+        self._start_trigger_udp_listener()
 
     def _init_ui(self) -> None:
         main_layout = QtWidgets.QVBoxLayout(self)
@@ -721,6 +765,11 @@ class DataAcquisitionPage(QtWidgets.QWidget):
         toolbar.addWidget(self._add_device_btn)
         
         toolbar.addStretch()
+        # 触发信息显示：仅显示 trigger + 时间（秒）
+        self._trigger_display = QtWidgets.QLabel("Trigger: - | Time(s): -")
+        toolbar.addWidget(self._trigger_display)
+        self._beijing_time_label = QtWidgets.QLabel("北京时间: --")
+        toolbar.addWidget(self._beijing_time_label)
         
         # 全局数据保存按钮
         self._save_data_btn = QtWidgets.QPushButton("开始保存数据")
@@ -732,6 +781,8 @@ class DataAcquisitionPage(QtWidgets.QWidget):
         # trigger 竖线提示
         self._trigger_line = pg.InfiniteLine(pen=pg.mkPen("r", width=2))
         self._trigger_line.setVisible(False)
+        self._trigger_label = pg.TextItem(color=(200, 0, 0), anchor=(0.5, 1.1))
+        self._trigger_label.setVisible(False)
         
         self._status_label = QtWidgets.QLabel("就绪")
         toolbar.addWidget(self._status_label)
@@ -759,9 +810,17 @@ class DataAcquisitionPage(QtWidgets.QWidget):
         # 触发提示绑定到主绘图（第一个设备波形面板出现后添加）
         self._trigger_attached = False
         self._last_trigger_ts = 0
+        self._last_trigger_seen_time = 0.0
         self._trigger_timer = QtCore.QTimer(self)
         self._trigger_timer.timeout.connect(self._poll_trigger)
         self._trigger_timer.start(100)
+        self._trigger_reset_timer = QtCore.QTimer(self)
+        self._trigger_reset_timer.setSingleShot(True)
+        self._trigger_reset_timer.timeout.connect(self._reset_trigger_display)
+        self._clock_timer = QtCore.QTimer(self)
+        self._clock_timer.timeout.connect(self._update_beijing_time)
+        self._clock_timer.start(1000)
+        self._update_beijing_time()
 
     def _on_add_device_clicked(self) -> None:
         """添加设备按钮点击事件。"""
@@ -913,6 +972,8 @@ class DataAcquisitionPage(QtWidgets.QWidget):
             if not self._trigger_attached:
                 try:
                     panel.add_trigger_line(self._trigger_line)
+                    if self._trigger_label is not None:
+                        panel.pgplot.addItem(self._trigger_label)
                     self._trigger_attached = True
                 except Exception:
                     pass
@@ -1196,15 +1257,19 @@ class DataAcquisitionPage(QtWidgets.QWidget):
                 self._save_data_btn.setChecked(False)
                 return
 
-            # 选择保存文件夹
-            save_dir = QtWidgets.QFileDialog.getExistingDirectory(
-                self,
-                "选择数据保存文件夹",
-                str(Path.home() / "mpscap_data")
-            )
-            if not save_dir:
-                self._save_data_btn.setChecked(False)
-                return
+            # 选择保存文件夹（支持自动模式跳过弹窗）
+            if self._auto_save_dir:
+                save_dir = str(self._auto_save_dir)
+            else:
+                save_dir = QtWidgets.QFileDialog.getExistingDirectory(
+                    self,
+                    "选择数据保存文件夹",
+                    str(Path.home() / "mpscap_data")
+                )
+                if not save_dir:
+                    self._save_data_btn.setChecked(False)
+                    return
+            Path(save_dir).mkdir(parents=True, exist_ok=True)
             
             self._save_dir = save_dir
             self._emg_chs = 0
@@ -1218,6 +1283,8 @@ class DataAcquisitionPage(QtWidgets.QWidget):
             self._et_buf_x = []
             self._et_buf_y = []
             self._et_srate = 33.0
+            self._trigger_log = []
+            self._trigger_dat_path = None
             try:
                 shm = CreateShm(master=False)
                 self._emg_last_idx = shm.getvalue('curdataindex')
@@ -1233,8 +1300,10 @@ class DataAcquisitionPage(QtWidgets.QWidget):
 
             self._et_srate = 33.0
             self._save_start_ts = time.time()
+            self._save_ts_tag = time.strftime("%Y%m%d_%H%M%S")
+            self._update_panels_time_origin(self._save_start_ts)
             # 设置 .dat 保存路径并通知采集端开始落盘
-            ts = time.strftime("%Y%m%d_%H%M%S")
+            ts = self._save_ts_tag
             emg_dat = Path(save_dir) / f"EMG_{ts}.dat"
             if collecting_devices:
                 if shm is None:
@@ -1273,6 +1342,8 @@ class DataAcquisitionPage(QtWidgets.QWidget):
             self._status_label.setText(f"正在保存数据到: {Path(save_dir).name}")
             if eye_collecting and self._eye_devices:
                 self._save_timer.start(100)
+            # 清除自动保存标记（仅本次）
+            self._auto_save_dir = None
         else:
             # 停止保存
             self._saving = False
@@ -1282,6 +1353,11 @@ class DataAcquisitionPage(QtWidgets.QWidget):
             except Exception:
                 pass
             self._save_timer.stop()
+            # 写出残余 trigger
+            try:
+                self._flush_trigger_log()
+            except Exception:
+                pass
             # 关闭眼动文件并写出残留
             try:
                 if self._et_file_handle and (self._et_buf_x or self._et_buf_y):
@@ -1295,12 +1371,18 @@ class DataAcquisitionPage(QtWidgets.QWidget):
                 pass
             self._et_file_handle = None
             self._save_dir = None
+            self._save_ts_tag = None
             self._emg_dat_path = None
             self._et_dat_path = None
+            self._trigger_dat_path = None
+            self._trigger_log = []
             self._et_last_t_map = {}
             self._et_pending = {}
             self._et_buf_x = []
             self._et_buf_y = []
+            self._save_start_ts = 0.0
+            self._update_panels_time_origin(None)
+            self._reset_trigger_display()
             
             self._save_data_btn.setText("开始保存数据")
             self._save_data_btn.setStyleSheet("")
@@ -1341,19 +1423,187 @@ class DataAcquisitionPage(QtWidgets.QWidget):
             print(f"[WARNING] 写入眼动 .dat 失败: {e}")
 
     def _poll_trigger(self) -> None:
-        """轮询共享内存触发值，显示1秒竖线提示。"""
+        """轮询共享内存触发值，显示并记录 trigger + 时间（秒）。"""
+        trig_val = 0
+        now_s = time.time()
         try:
             shm = CreateShm(master=False)
             trig_val = int(shm.getvalue('includetrigger') or 0)
         except Exception:
+            pass
+
+        udp_ts = None
+        if trig_val == 0 and self._trigger_udp_queue:
+            try:
+                while self._trigger_udp_queue:
+                    trig_val, udp_ts = self._trigger_udp_queue.popleft()
+            except Exception:
+                trig_val = 0
+                udp_ts = None
+
+        if trig_val == 0:
             return
-        now_ms = int(time.time() * 1000)
-        if trig_val != 0 and trig_val != self._last_trigger_ts:
-            # 新触发，显示竖线
-            self._trigger_line.setValue(self._trigger_line.value())  # 保持位置，仅闪烁
+
+        if udp_ts is not None:
+            now_s = udp_ts
+
+        t_rel = None
+        if self._save_start_ts:
+            t_rel = now_s - self._save_start_ts
+
+        # 刷新显示（0.5s 后自动恢复为无）
+        if t_rel is not None:
+            self._trigger_display.setText(f"Trigger: {trig_val} | Time(s): {t_rel:.3f}")
+        else:
+            self._trigger_display.setText(f"Trigger: {trig_val} | Time(s): -")
+        self._last_trigger_ts = trig_val
+        self._last_trigger_seen_time = now_s
+
+        try:
+            if t_rel is not None:
+                self._trigger_line.setValue(t_rel)
             self._trigger_line.setVisible(True)
-            self._last_trigger_ts = trig_val
-            QtCore.QTimer.singleShot(1000, lambda: self._trigger_line.setVisible(False))
+            if self._trigger_label is not None and t_rel is not None:
+                self._trigger_label.setPlainText(str(trig_val))
+                self._trigger_label.setPos(self._trigger_line.value(), 0)
+                self._trigger_label.setVisible(True)
+        except Exception:
+            pass
+
+        # 触发文字与线条：2s 后复位；线条持续显示，随时间轴左移直至滑出视窗
+        self._trigger_reset_timer.stop()
+        self._trigger_reset_timer.start(2000)
+
+        # 记录触发日志（同值也追加，确保不丢）
+        if self._saving and t_rel is not None:
+            self._trigger_log.append((float(trig_val), float(t_rel)))
+            if self._trigger_log and len(self._trigger_log) % 100 == 0:
+                self._flush_trigger_log()
+
+    def _flush_trigger_log(self) -> None:
+        """将触发日志写盘（仅在保存开启时使用）。"""
+        if not (self._saving and self._save_dir and self._trigger_log):
+            return
+        if self._trigger_dat_path is None and self._save_ts_tag:
+            self._trigger_dat_path = Path(self._save_dir) / f"{self._trigger_file_stem()}.dat"
+        if self._trigger_dat_path is None:
+            return
+        try:
+            import numpy as np
+            arr = np.array(self._trigger_log, dtype=np.float64)
+            with open(self._trigger_dat_path, "ab") as f:
+                f.write(arr.tobytes())
+            self._trigger_log = []
+        except Exception as e:
+            print(f"[WARNING] 写入 trigger 数据失败: {e}")
+
+    def _reset_trigger_display(self) -> None:
+        """恢复触发显示为默认状态并隐藏标记线。"""
+        try:
+            self._trigger_display.setText("Trigger: - | Time(s): -")
+            if self._trigger_line is not None:
+                self._trigger_line.setVisible(False)
+            if self._trigger_label is not None:
+                self._trigger_label.setVisible(False)
+        except Exception:
+            pass
+
+    def _update_panels_time_origin(self, t0: Optional[float]) -> None:
+        """将时间起点同步给所有波形面板。"""
+        for info in self._devices.values():
+            panel = info.get('panel')
+            if panel is not None:
+                try:
+                    panel.set_time_origin(t0)
+                except Exception:
+                    pass
+
+    def _trigger_file_stem(self) -> str:
+        """返回触发文件名（不含扩展名），包含范式名称前缀。"""
+        base = self._current_paradigm_name or "TRIGGER"
+        safe = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in base).strip("_")
+        if not safe:
+            safe = "TRIGGER"
+        return f"{safe}_{self._save_ts_tag}" if self._save_ts_tag else safe
+
+    def _update_beijing_time(self) -> None:
+        """更新时间标签为北京时间（UTC+8）。"""
+        try:
+            now = datetime.now(timezone(timedelta(hours=8)))
+            self._beijing_time_label.setText(now.strftime("北京时间: %Y-%m-%d %H:%M:%S"))
+        except Exception:
+            pass
+
+    def _start_trigger_udp_listener(self) -> None:
+        """启动本地 UDP 监听作为触发备选通道（127.0.0.1:port）。"""
+        if self._trigger_udp_thread is not None:
+            return
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind(("127.0.0.1", self._trigger_udp_port))
+            sock.settimeout(1.0)
+            self._trigger_udp_socket = sock
+        except Exception as e:
+            print(f"[Trigger UDP] 启动失败，继续使用共享内存触发: {e}")
+            self._trigger_udp_socket = None
+            return
+
+        def _loop() -> None:
+            while not self._trigger_udp_stop.is_set():
+                try:
+                    data, _ = sock.recvfrom(1024)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                try:
+                    val = int((data or b"0").decode().strip())
+                except Exception:
+                    continue
+                if val == 0:
+                    continue
+                try:
+                    self._trigger_udp_queue.append((val, time.time()))
+                except Exception:
+                    pass
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+        self._trigger_udp_thread = threading.Thread(target=_loop, daemon=True)
+        self._trigger_udp_thread.start()
+
+    def _stop_trigger_udp_listener(self) -> None:
+        """停止 UDP 触发监听线程。"""
+        try:
+            self._trigger_udp_stop.set()
+        except Exception:
+            pass
+        try:
+            if self._trigger_udp_socket is not None:
+                self._trigger_udp_socket.close()
+        except Exception:
+            pass
+        self._trigger_udp_socket = None
+        self._trigger_udp_thread = None
+
+    def start_saving_auto(self, save_dir: Optional[str] = None) -> bool:
+        """
+        外部调用：自动开始保存数据。
+        - save_dir 为空则使用 ~/mpscap_data
+        - 跳过目录选择对话框
+        返回是否成功进入保存状态。
+        """
+        if self._saving:
+            return True
+        auto_dir = Path(save_dir) if save_dir else (Path.home() / "mpscap_data")
+        auto_dir.mkdir(parents=True, exist_ok=True)
+        self._auto_save_dir = auto_dir
+        # 触发按钮，进入保存流程（让 toggled 信号正常触发）
+        self._save_data_btn.setChecked(True)
+        # 如果保存失败，checked 会被复位
+        return self._saving
 
     def _cleanup_all(self) -> None:
         """统一清理资源，供closeEvent/shutdown调用。"""
@@ -1368,6 +1618,12 @@ class DataAcquisitionPage(QtWidgets.QWidget):
         # 关闭眼动设备
         for dev in list(self._eye_devices):
             self._remove_eye_device(dev)
+
+        self._stop_trigger_udp_listener()
+
+    def set_paradigm_name(self, name: Optional[str]) -> None:
+        """供范式页传入当前范式名，用于触发文件命名。"""
+        self._current_paradigm_name = name or None
 
     def closeEvent(self, event) -> None:  # pragma: no cover - UI 行为
         """关闭事件，清理所有设备。"""

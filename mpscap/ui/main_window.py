@@ -33,7 +33,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(offline_converter, "离线转换")
         data_processing = DataProcessingPage()
         self.tabs.addTab(data_processing, "数据处理")
-        task_execution = TaskExecutionPage()
+        task_execution = TaskExecutionPage(dashboard)
         self.tabs.addTab(task_execution, "任务执行")
         self.tabs.addTab(QtWidgets.QWidget(), "结果反馈")
         self.setCentralWidget(self.tabs)
