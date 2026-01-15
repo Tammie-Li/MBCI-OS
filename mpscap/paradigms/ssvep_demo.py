@@ -1,98 +1,147 @@
 from __future__ import annotations
 
+import sys
 import time
-from typing import List, Optional
+from typing import List, Optional, Callable
 
 
-def run_ssvep_demo(trigger_com: Optional[str] = None, freqs: Optional[List[float]] = None) -> None:
+def run_ssvep_demo(
+    freqs: Optional[List[float]] = None,
+    cycles: int = 1,
+    refresh_rate: float = 75.0,
+    stim_duration: float = 4.0,
+    trigger_cb: Optional[Callable[[int], None]] = None,
+    tip_time: float = 0.5,
+) -> None:
     """
-    简化版 SSVEP 范式演示（基于 PsychoPy），用于快速可视化与触发输出。
-
-    - 若安装了 psychopy，则会弹出全屏窗口，展示 4 个频闪目标（默认频率 [8, 10, 12, 15] Hz）。
-    - 可选串口触发：trigger_com 不为空时，以 115200 波特发送单字节标记（0x01 开始，0x02 结束，目标ID）。
-    - 演示时长：每目标 4s，轮询播放 1 轮。
+    参考 examples/paradigm/ssvep_stimulate.py，使用 4x10 频闪阵列。
+    - 默认 40 个刺激，频率 8.0~15.8 Hz（步长 0.2）。
+    - 每个刺激时长可配（stim_duration），轮次 cycles。
+    - 开始每个刺激前显示红色三角提示当前目标，并在顶部显示真实标签（编号）。
+    - trigger_cb 可选：每个刺激开始时发送标签（index+1），外层轮/实验触发由 worker 负责。
     """
     try:
         from psychopy import visual, event, core
+        import numpy as np
     except Exception as e:
-        print(f"[SSVEP] PsychoPy 未安装，无法运行演示: {e}")
+        print(f"[SSVEP] PsychoPy 未安装或加载失败: {e}")
         return
 
-    try:
-        import serial
-    except Exception:
-        serial = None
-
-    # 串口触发
-    trig = None
-    if trigger_com and serial is not None:
-        try:
-            trig = serial.Serial(trigger_com, 115200, timeout=0.5)
-        except Exception as e:
-            print(f"[SSVEP] 打开串口 {trigger_com} 失败，继续无触发: {e}")
-            trig = None
-
-    def send_trigger(code: int) -> None:
-        if trig is None:
+    def _make_process_dpi_aware() -> None:
+        if not sys.platform.startswith("win"):
             return
         try:
-            trig.write(bytes([code & 0xFF]))
+            import ctypes
+
+            shcore = getattr(ctypes, "windll", None) and getattr(ctypes.windll, "shcore", None)
+            if shcore and hasattr(shcore, "SetProcessDpiAwareness"):
+                shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_AWARE
+            elif hasattr(ctypes.windll.user32, "SetProcessDPIAware"):
+                ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
 
-    freqs = freqs or [8.0, 10.0, 12.0, 15.0]
-    stim_time = 4.0
-    refresh_hz = 75.0
-    frames = int(stim_time * refresh_hz)
+    freqs = freqs or list(np.arange(8.0, 16.0, 0.2))  # 40 频点
+    stim_num = len(freqs)
+    stim_r_num, stim_c_num = 4, 10
+    if stim_num < stim_r_num * stim_c_num:
+        need = stim_r_num * stim_c_num - stim_num
+        freqs = freqs + freqs[:need]
+    freqs = freqs[: stim_r_num * stim_c_num]
 
-    # 创建窗口
-    # 改为窗口模式，1920x1080，避免全屏遮挡主界面
-    win = visual.Window(size=(1920, 1080), units="pix", color=(-1, -1, -1), fullscr=False, allowGUI=True)
+    stim_radius = 160
+    positions = []
+    for idx in range(stim_r_num * stim_c_num):
+        x_tmp = -960 + 105 + (stim_radius + 30) * (idx % stim_c_num)
+        y_tmp = 540 - 280 - (stim_radius + 70) * (idx // stim_c_num)
+        positions.append([x_tmp, y_tmp])
 
-    # 创建 4 个频闪方块
-    positions = [(-400, 200), (400, 200), (-400, -200), (400, -200)]
-    rects = []
-    for pos in positions[: len(freqs)]:
-        rects.append(visual.Rect(win=win, width=200, height=200, fillColor="white", lineColor="white", pos=pos))
+    _make_process_dpi_aware()
+    win = visual.Window(
+        size=(1920, 1080),
+        units="pix",
+        color=(-1, -1, -1),
+        fullscr=False,
+        allowGUI=True,
+        checkTiming=False,
+        winType="pyglet",
+    )
 
-    info = visual.TextStim(win=win, text="按 ESC 随时退出\n自动播放一轮 SSVEP 刺激", pos=(0, 0), color="white")
-    info.draw()
-    win.flip()
-    core.wait(1.0)
+    stim = visual.ElementArrayStim(
+        win=win,
+        nElements=stim_r_num * stim_c_num,
+        sfs=0,
+        sizes=[stim_radius, stim_radius],
+        xys=positions,
+        phases=0,
+        colors=(1, 1, 1),
+        elementTex="sin",
+        elementMask=None,
+    )
+
+    texts = [
+        visual.TextStim(
+            win=win,
+            text=str(i + 1),
+            pos=positions[i],
+            colorSpace="rgb255",
+            color=(0, 0, 0),
+            height=70,
+            autoLog=False,
+        )
+        for i in range(stim_r_num * stim_c_num)
+    ]
+
+    triangle_tip_radius = 30
+    triangle_tip = visual.Polygon(
+        win=win,
+        edges=3,
+        units="pix",
+        radius=triangle_tip_radius,
+        fillColor="red",
+        lineColor="red",
+        pos=(0, 0),
+    )
+    label_txt = visual.TextStim(win=win, text="", pos=(0, 500), color="red", height=48)
+
+    frames = int(stim_duration * refresh_rate)
 
     try:
-        for idx, freq in enumerate(freqs):
-            send_trigger(0x01)  # 开始
-            start = time.time()
-            for f_idx in range(frames):
-                # 闪烁：使用正弦调制亮度
-                phase = 2 * 3.14159 * freq * (f_idx / refresh_hz)
-                amp = 0.5 * (1 + (1 if (f_idx * freq / refresh_hz) % 1 < 0.5 else -1))
-                rects[idx].fillColor = [amp * 2 - 1] * 3
-                rects[idx].lineColor = rects[idx].fillColor
-                for r_i, r in enumerate(rects):
-                    if r_i == idx:
-                        r.draw()
+        for _ in range(max(1, cycles)):
+            for idx, freq in enumerate(freqs):
+                # 目标提示
+                x, y = positions[idx]
+                triangle_tip.setPos([x, y - stim_radius * 0.5 - triangle_tip_radius])
+                label_txt.setText(f"目标: {idx + 1}")
+                triangle_tip.draw()
+                label_txt.draw()
                 win.flip()
-                if "escape" in event.getKeys():
-                    raise KeyboardInterrupt()
-            send_trigger(0x10 + idx + 1)  # 目标ID触发
-            # 间隔 1s
-            wait_t = max(0.0, 1.0 - (time.time() - start - stim_time))
-            if wait_t > 0:
-                core.wait(wait_t)
-        send_trigger(0x02)  # 结束
+                core.wait(max(0.1, tip_time))
+
+                # 触发（真实标签）
+                if trigger_cb:
+                    trigger_cb(idx + 1)
+
+                start_t = time.time()
+                for frame_idx in range(frames):
+                    phases = (np.array(freqs, dtype=float) * frame_idx / refresh_rate) % 2 * np.pi
+                    stim.phases = phases
+                    stim.draw()
+                    for t in texts:
+                        t.draw()
+                    label_txt.draw()
+                    triangle_tip.draw()
+                    win.flip()
+                    if "escape" in event.getKeys():
+                        raise KeyboardInterrupt()
+                rest_t = max(0.0, 1.0 - (time.time() - start_t - stim_duration))
+                if rest_t > 0:
+                    core.wait(rest_t)
     except KeyboardInterrupt:
-        send_trigger(0xFF)
+        if trigger_cb:
+            trigger_cb(0xFF)
     finally:
         try:
             win.close()
         except Exception:
             pass
-        if trig is not None:
-            try:
-                trig.close()
-            except Exception:
-                pass
-
-

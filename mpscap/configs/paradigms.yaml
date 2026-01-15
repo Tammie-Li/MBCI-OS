@@ -15,4 +15,12 @@
   modalities: [EYE]
   parameters:
     dwell_time_ms: 800
+    target_count: 10
+    layout: random
+- name: Eye_4Class
+  modalities: [EYE]
+  parameters:
+    trials: 200
+    phase_sec: 3.0
+    ring_sec: 3.0
 

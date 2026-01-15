@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .gesture_demo import run_gesture_sequence
+from .eye_target_demo import run_eye_target_demo
+from .eye_4class_demo import run_eye_4class_demo
 from .ssvep_demo import run_ssvep_demo
+from .rsvp_demo import run_rsvp_demo
 from ..core.utils.shm import CreateShm
 
 try:
@@ -208,6 +211,8 @@ def run_ssvep_worker(
     kafka_topic: Optional[str] = None,
     paradigm_name: Optional[str] = None,
     save_dir: Optional[str] = None,
+    cycles: int = 1,
+    stim_duration: float = 4.0,
 ) -> None:
     """独立进程运行 SSVEP 范式，可选开启 Kafka 订阅。"""
     logger = TriggerFileLogger(paradigm_name or "SSVEP", save_dir)
@@ -220,7 +225,48 @@ def run_ssvep_worker(
     consumer, evt = _start_kafka_consumer(kafka_bootstrap, kafka_topic)
     try:
         _send(254)  # 实验开始
-        run_ssvep_demo(trigger_com=trigger_com, freqs=freqs)
+        for c in range(max(1, cycles)):
+            _send(252)  # 轮开始
+            run_ssvep_demo(freqs=freqs, cycles=1, stim_duration=stim_duration, trigger_cb=_send)
+            _send(253)  # 轮结束
+    finally:
+        _send(255)  # 实验结束
+        logger.close()
+        _stop_kafka_consumer(consumer, evt)
+
+
+def run_rsvp_worker(
+    target_dir: str,
+    nontarget_dir: str,
+    cycles: int,
+    kafka_bootstrap: Optional[str] = None,
+    kafka_topic: Optional[str] = None,
+    paradigm_name: Optional[str] = None,
+    save_dir: Optional[str] = None,
+    stim_freq: float = 10.0,
+) -> None:
+    """独立进程运行 RSVP 范式。"""
+    logger = TriggerFileLogger(paradigm_name or "RSVP", save_dir)
+
+    def _send(code: int) -> None:
+        _send_trigger(code)
+        logger.log(code)
+
+    consumer, evt = _start_kafka_consumer(kafka_bootstrap, kafka_topic)
+    try:
+        _send(254)  # 实验开始
+        for _ in range(max(1, cycles)):
+            _send(252)  # 轮开始
+            run_rsvp_demo(
+                target_dir=Path(target_dir),
+                nontarget_dir=Path(nontarget_dir),
+                cycles=1,
+                target_code=2,
+                nontarget_code=1,
+                trigger_cb=_send,
+                stim_freq=stim_freq,
+            )
+            _send(253)  # 轮结束
     finally:
         _send(255)  # 实验结束
         logger.close()
@@ -261,6 +307,73 @@ def run_gesture_worker(
             trigger_cb=_send,
         )
     finally:
+        logger.close()
+        _stop_kafka_consumer(consumer, evt)
+
+
+def run_eye_target_worker(
+    target_count: int = 10,
+    dwell_time_sec: float = 0.8,
+    layout: str = "random",
+    kafka_bootstrap: Optional[str] = None,
+    kafka_topic: Optional[str] = None,
+    paradigm_name: Optional[str] = None,
+    save_dir: Optional[str] = None,
+) -> None:
+    """独立进程运行眼动目标消除范式。"""
+    logger = TriggerFileLogger(paradigm_name or "Eye_Target", save_dir)
+
+    def _send(code: int) -> None:
+        _send_trigger(code)
+        logger.log(code)
+
+    consumer, evt = _start_kafka_consumer(kafka_bootstrap, kafka_topic)
+    try:
+        _send(254)  # 实验开始
+        _send(252)  # 轮开始（眼动范式只有一轮）
+        run_eye_target_demo(
+            target_count=target_count,
+            dwell_time_sec=dwell_time_sec,
+            layout=layout,
+            trigger_cb=_send,
+            save_dir=save_dir,
+        )
+    finally:
+        _send(253)  # 轮结束
+        _send(255)  # 实验结束
+        logger.close()
+        _stop_kafka_consumer(consumer, evt)
+
+
+def run_eye_4class_worker(
+    trials: int = 200,
+    phase_sec: float = 3.0,
+    ring_sec: float = 3.0,
+    kafka_bootstrap: Optional[str] = None,
+    kafka_topic: Optional[str] = None,
+    paradigm_name: Optional[str] = None,
+    save_dir: Optional[str] = None,
+) -> None:
+    """独立进程运行眼动四分类范式。"""
+    logger = TriggerFileLogger(paradigm_name or "Eye_4Class", save_dir)
+
+    def _send(code: int) -> None:
+        _send_trigger(code)
+        logger.log(code)
+
+    consumer, evt = _start_kafka_consumer(kafka_bootstrap, kafka_topic)
+    try:
+        _send(254)  # 实验开始
+        _send(252)  # 轮开始（连续 trials 次）
+        run_eye_4class_demo(
+            trials=trials,
+            phase_sec=phase_sec,
+            ring_sec=ring_sec,
+            trigger_cb=_send,
+        )
+    finally:
+        _send(253)  # 轮结束
+        _send(255)  # 实验结束
         logger.close()
         _stop_kafka_consumer(consumer, evt)
 

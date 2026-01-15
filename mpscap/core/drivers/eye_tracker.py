@@ -58,19 +58,41 @@ class _TobiiWorker(threading.Thread):
         self._lock = threading.Lock()
         self._latest: Tuple[float, float] = (-1.0, -1.0)
         self._quit = False
+        self._sock: Optional[socket.socket] = None
 
         root = Path(__file__).resolve().parents[3]  # .../MPSCAP
-        data_dir = root / "Eye_Tracker" / "data_files"
+        data_dir = root / "Lib" / "EyeTracker"
         exe_path = data_dir / "tobii_4c_app.exe"
         if not exe_path.exists():
             raise FileNotFoundError(f"未找到眼动服务程序: {exe_path}")
+
+        # 先绑定 UDP 端口，避免端口占用导致子线程启动失败
+        bind_ok = False
+        bind_port = user_port
+        for port in range(user_port, user_port + 20):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((user_ip, port))
+                sock.settimeout(1.0)
+                self._sock = sock
+                bind_ok = True
+                bind_port = port
+                break
+            except OSError:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+        if not bind_ok:
+            raise OSError(f"无法绑定眼动 UDP 端口（{user_port}~{user_port + 19}）")
 
         # 启动眼动采集服务（隐藏窗口）
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self._proc = subprocess.Popen(
             [
                 str(exe_path),
-                str(user_port),
+                str(bind_port),
                 user_ip,
                 str(tobii_port),
                 tobii_ip,
@@ -83,7 +105,7 @@ class _TobiiWorker(threading.Thread):
         self._xs = [0.0] * self._filter_len
         self._ys = [0.0] * self._filter_len
 
-        self._user_addr = (user_ip, user_port)
+        self._user_addr = (user_ip, bind_port)
         self._tobii_addr = (tobii_ip, tobii_port)
 
         self.start()
@@ -105,6 +127,12 @@ class _TobiiWorker(threading.Thread):
         # 等待线程退出
         self.join(timeout=1.0)
 
+        try:
+            if self._sock is not None:
+                self._sock.close()
+        except Exception:
+            pass
+
         # 终止子进程
         try:
             if self._proc and self._proc.poll() is None:
@@ -113,9 +141,9 @@ class _TobiiWorker(threading.Thread):
             pass
 
     def run(self) -> None:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(1.0)
-        sock.bind(self._user_addr)
+        sock = self._sock
+        if sock is None:
+            return
 
         while not self._quit:
             try:

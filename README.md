@@ -5,6 +5,8 @@
 ## 主要功能
 - 数据采集：通过 UI 进行设备配置、波形显示与数据保存/发布（Kafka、文件、TSDB）。
 - 眼动信号：内置 Tobii 4C 启动器，添加眼动仪设备后实时采集并绘制 X/Y 双通道轨迹，可 Kafka 发布。
+- 眼动范式：新增“眼动目标消除”范式（Pygame 窗口），注视目标达到阈值后触发并记录轨迹。
+- 脑电采集：新增 Neuracle / BP / Biosemi 脑电 TCP 设备，开始采集后弹出独立多通道窗口，可 Kafka 发布（同类型设备互斥）。
 - 空域可视化：IMU 手部姿态模型、坐标系映射、静止检测与互补滤波。
 - 数据解码与共享内存：驱动层解码 EMG/ACC/Glove 并写入共享内存，供 UI 实时读取。
 - Kafka 发布：可配置 Kafka 服务器，实时发布采集数据。
@@ -18,6 +20,10 @@
 pip install -r requirements.txt
 # 训练示例所需：PyTorch + matplotlib + scikit-learn（需额外安装）
 pip install torch torchvision torchaudio matplotlib scikit-learn
+# 眼动范式所需：Pygame
+pip install pygame
+# 视觉范式所需：PsychoPy
+pip install psychopy
 ```
 
 ## EMGNet 训练示例（使用 4 个文件：x_train, y_train, x_test, y_test）
@@ -48,6 +54,20 @@ python scripts/train_emgnet.py ^
 - `mpscap/core/drivers/eye_tracker.py`：Tobii 4C 眼动采集封装，启动本地服务并输出 gaze 坐标。
 - `mpscap/core/utils/`：共享内存、数据管理、滤波工具。
 - `scripts/train_emgnet.py`：EMGNet 训练与实时可视化示例。
+
+## 眼动目标消除范式
+- 入口：启动 UI（`python -m mpscap.app`）后进入“任务执行”页，选择“眼动消除”卡片。
+- 配置项：目标数量（默认 10）、注视阈值（秒，默认 0.8）、排列模式（random/grid/circle/triangle）。
+- 运行要求：需存在 `Lib/EyeTracker/tobii_4c_app.exe`，并已安装 `pygame`。
+- 触发码：254 实验开始、252 轮开始（单轮）、每个被消除目标发送其编号、253 轮结束、255 实验结束。
+- 数据落盘：选择保存目录后，范式会在该目录下生成 `eye_target/`，包含注视轨迹（CSV）与目标选中摘要（txt）；若未选目录则默认写入 `~/mpscap_eye/eye_target/`。
+- 改进思考：可在后续加入目标半径/背景自定义、更多触发码映射配置与回放复现入口。
+
+## 眼动四分类范式（PsychoPy）
+- 入口：任务执行页选择“眼动四分类”。
+- 配置项：次数（默认 200）、阶段时长（秒，默认 3.0）、环点时长（秒，默认 3.0）。
+- 流程：Noise/Blinks → Saccades → Smooth Pursuits → Fixations（每段约 3s），随后展示环状 5 点约 3s；每次结束按空格进入下一次。
+- 触发码：1/2/3/4 对应四个阶段，10 为环点阶段；实验开始/结束仍为 254/255（轮 252/253）。
 
 ## 常用命令
 - 启动采集应用：`python -m mpscap.app`

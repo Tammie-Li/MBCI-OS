@@ -6,7 +6,14 @@ from pathlib import Path
 
 from PyQt5 import QtCore, QtWidgets, QtGui
 
-from ...paradigms.paradigm_worker import run_ssvep_worker, run_gesture_worker
+from ...paradigms.paradigm_worker import (
+    run_ssvep_worker,
+    run_gesture_worker,
+    run_rsvp_worker,
+    run_eye_target_worker,
+    run_eye_4class_worker,
+)
+from ...core.utils.shm import CreateShm
 
 
 class TaskExecutionPage(QtWidgets.QWidget):
@@ -22,6 +29,7 @@ class TaskExecutionPage(QtWidgets.QWidget):
         self._feedback_status = QtWidgets.QLabel("反馈结果：暂无")
         self._trigger_com_edit = QtWidgets.QLineEdit()
         self._trigger_com_edit.setPlaceholderText("可选：触发串口，如 COM3")
+        self._trigger_com_edit.setClearButtonEnabled(True)
         self._selected_paradigm: Optional[str] = None
         self._selected_paradigm_params: Dict[str, str] = {}
         self._selected_model: Optional[str] = None
@@ -49,6 +57,7 @@ class TaskExecutionPage(QtWidgets.QWidget):
         self._proc_timer.timeout.connect(self._check_proc_done)
         self._running_paradigm: Optional[str] = None
         self._init_ui()
+        self._apply_styles()
 
     def _init_ui(self) -> None:
         splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
@@ -56,51 +65,114 @@ class TaskExecutionPage(QtWidgets.QWidget):
         splitter.addWidget(self._build_demo_panel())
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
+        splitter.setChildrenCollapsible(False)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(splitter)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+    def _apply_styles(self) -> None:
+        self.setStyleSheet(
+            """
+            QWidget { font-family: "Microsoft YaHei"; font-size: 18px; }
+            QLabel#sectionTitle { font-size: 22px; font-weight: bold; color: #2b2f36; }
+            QLabel#sectionSub { color: #6b7280; font-size: 17px; }
+            QLabel#statusBadge { background: #f3f4f6; color: #374151; border-radius: 6px; padding: 6px 8px; }
+            QGroupBox#paradigmCard { border: 1px solid #e5e7eb; border-radius: 12px; margin-top: 8px; padding: 12px; background: #ffffff; }
+            QGroupBox#paradigmCard:hover { border-color: #c7d2fe; }
+            QGroupBox#paradigmCard QLabel { font-size: 20px; }
+            QGroupBox#paradigmCard QLineEdit,
+            QGroupBox#paradigmCard QComboBox,
+            QGroupBox#paradigmCard QPushButton { font-size: 20px; }
+            QGroupBox { border: 1px solid #e5e7eb; border-radius: 10px; margin-top: 8px; padding: 12px; background: #ffffff; }
+            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #111827; }
+            QLineEdit, QComboBox { background: #ffffff; border: 1px solid #d1d5db; border-radius: 6px; padding: 6px 8px; color: #111827; }
+            QPushButton { background: #f3f4f6; border: 1px solid #d1d5db; padding: 6px 12px; border-radius: 6px; }
+            QPushButton:hover { background: #e5e7eb; }
+            QPushButton:pressed { background: #e2e8f0; }
+            QPushButton[primary="true"] { background: #2563eb; border-color: #2563eb; color: #ffffff; }
+            QPushButton[toggle="true"] { background: #f87171; border-color: #ef4444; color: #ffffff; font-weight: bold; }
+            QPushButton[toggle="true"]:checked { background: #22c55e; border-color: #16a34a; color: #ffffff; }
+            QProgressBar { border: 1px solid #d1d5db; border-radius: 6px; text-align: center; background: #f9fafb; }
+            QProgressBar::chunk { background: #2563eb; border-radius: 6px; }
+            """
+        )
 
     def _build_paradigm_panel(self) -> QtWidgets.QWidget:
         container = QtWidgets.QWidget()
         vbox = QtWidgets.QVBoxLayout(container)
         vbox.setContentsMargins(8, 8, 8, 8)
-        vbox.setSpacing(8)
+        vbox.setSpacing(10)
 
-        title = QtWidgets.QLabel("数据采集（范式选择 & Trigger 反馈）")
-        title.setStyleSheet("font-weight: bold;")
+        title = QtWidgets.QLabel("实验范式配置")
+        title.setObjectName("sectionTitle")
+        subtitle = QtWidgets.QLabel("选择范式并填写参数，点击“应用配置”生效")
+        subtitle.setObjectName("sectionSub")
         vbox.addWidget(title)
-        vbox.addWidget(self._paradigm_status)
-        vbox.addWidget(self._trigger_status)
+        vbox.addWidget(subtitle)
+
+        status_row = QtWidgets.QHBoxLayout()
+        self._paradigm_status.setObjectName("statusBadge")
+        self._trigger_status.setObjectName("statusBadge")
+        status_row.addWidget(self._paradigm_status)
+        status_row.addWidget(self._trigger_status)
+        status_row.addStretch()
+        vbox.addLayout(status_row)
 
         self._paradigm_group = QtWidgets.QButtonGroup(self)
         self._paradigm_group.setExclusive(True)
+        self._paradigm_toggle_buttons: List[QtWidgets.QPushButton] = []
 
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         cards = QtWidgets.QWidget()
         grid = QtWidgets.QGridLayout(cards)
         grid.setSpacing(12)
+        grid.setContentsMargins(0, 6, 0, 0)
+        grid.setColumnStretch(0, 1)
 
         paradigms: List[Dict] = [
             {
                 "name": "SSVEP",
-                "desc": "稳态视觉诱发电位，多频闪烁刺激。",
+                "desc": "",
                 "params": [
-                    ("刺激频率(Hz)", "15, 12, 10"),
-                    ("单轮时长(s)", "5"),
-                    ("重复次数", "10"),
+                    ("轮数", "5"),
+                    ("每刺激时长(s)", "4.0"),
                 ],
             },
             {
                 "name": "RSVP",
-                "desc": "快速序列视觉呈现，适用于目标检测。",
+                "desc": "",
                 "params": [
-                    ("呈现速率(Hz)", "8"),
-                    ("目标比例(%)", "10"),
                     ("轮数", "5"),
+                    ("刺激频率(Hz)", "10"),
+                    ("target文件夹", str(Path("Lib/EEG/rsvp/images/tar"))),
+                    ("non-target文件夹", str(Path("Lib/EEG/rsvp/images/notar"))),
+                ],
+            },
+            {
+                "name": "眼动消除",
+                "desc": "",
+                "params": [
+                    ("目标数量", "10"),
+                    ("注视阈值(s)", "0.8"),
+                    ("排列模式", "random"),
+                ],
+            },
+            {
+                "name": "眼动四分类",
+                "desc": "",
+                "params": [
+                    ("次数", "200"),
+                    ("阶段时长(s)", "3.0"),
+                    ("环点时长(s)", "3.0"),
                 ],
             },
             {
                 "name": "手势识别",
-                "desc": "基于肌电的多手势范式（按配置依次呈现图片+提示词）。",
+                "desc": "",
                 "params": [
                     ("手势名称列表", "拳,张,捏,勾,指,摆"),
                     ("每张图片显示时长(s)", "10.0"),
@@ -113,49 +185,108 @@ class TaskExecutionPage(QtWidgets.QWidget):
 
         for idx, paradigm in enumerate(paradigms):
             card, radio = self._create_paradigm_card(paradigm)
-            self._paradigm_group.addButton(radio)
-            r = idx // 2
-            c = idx % 2
-            grid.addWidget(card, r, c)
+            if radio is not None:
+                self._paradigm_group.addButton(radio)
+            r = idx
+            grid.addWidget(card, r, 0)
 
-        vbox.addWidget(cards)
+        scroll.setWidget(cards)
+        vbox.addWidget(scroll)
         vbox.addStretch()
         return container
 
     def _create_paradigm_card(self, paradigm: Dict) -> (QtWidgets.QGroupBox, QtWidgets.QRadioButton):
         box = QtWidgets.QGroupBox(paradigm["name"])
-        v = QtWidgets.QVBoxLayout(box)
-        title_row = QtWidgets.QHBoxLayout()
-        radio = QtWidgets.QRadioButton("选择")
-        title_row.addWidget(radio)
-        title_row.addWidget(QtWidgets.QLabel(paradigm["desc"]))
-        title_row.addStretch()
-        v.addLayout(title_row)
-        form = QtWidgets.QFormLayout()
+        box.setObjectName("paradigmCard")
+        row = QtWidgets.QHBoxLayout(box)
+        row.setContentsMargins(8, 6, 8, 6)
+        row.setSpacing(10)
+
+        title = QtWidgets.QLabel(paradigm["name"])
+        title.setStyleSheet("font-weight: bold;")
+        title.setMinimumWidth(120)
+        row.addWidget(title)
+
         edits = {}
+        params_row = QtWidgets.QHBoxLayout()
+        params_row.setSpacing(8)
         for label, default in paradigm.get("params", []):
-            edit = QtWidgets.QLineEdit()
-            edit.setText(str(default))
-            form.addRow(label, edit)
-            edits[label] = edit
-        v.addLayout(form)
-        apply_btn = QtWidgets.QPushButton("应用配置")
-        apply_btn.clicked.connect(lambda _=None, name=paradigm["name"], edits=edits, r=radio, box=box: self._on_paradigm_selected(name, edits, r, box))
-        v.addWidget(apply_btn)
+            lbl = QtWidgets.QLabel(label)
+            lbl.setObjectName("sectionSub")
+            params_row.addWidget(lbl)
+            if label == "排列模式":
+                combo = QtWidgets.QComboBox()
+                combo.addItems(["random", "grid", "circle", "triangle"])
+                if default in {"random", "grid", "circle", "triangle"}:
+                    combo.setCurrentText(default)
+                combo.setToolTip("random=随机, grid=网格, circle=圆形, triangle=三角形")
+                combo.setMinimumWidth(120)
+                params_row.addWidget(combo)
+                edits[label] = combo
+            else:
+                edit = QtWidgets.QLineEdit()
+                edit.setText(str(default))
+                edit.setMinimumWidth(120)
+                params_row.addWidget(edit)
+                edits[label] = edit
+        row.addLayout(params_row)
+        row.addStretch()
         if paradigm["name"] == "手势识别":
             img_btn = QtWidgets.QPushButton("选择手势图片（可多选）")
             img_btn.clicked.connect(self._choose_gesture_files)
-            v.addWidget(img_btn)
+            row.addWidget(img_btn)
+        toggle_btn = QtWidgets.QPushButton("OFF")
+        toggle_btn.setCheckable(True)
+        toggle_btn.setProperty("toggle", True)
+        toggle_btn.setMinimumHeight(36)
+        radio = None
+        toggle_btn.toggled.connect(
+            lambda checked, name=paradigm["name"], edits=edits, btn=toggle_btn, box=box: self._on_paradigm_toggled(
+                checked, name, edits, btn, box
+            )
+        )
+        self._paradigm_toggle_buttons.append(toggle_btn)
+        row.addWidget(toggle_btn)
         return box, radio
 
-    def _on_paradigm_selected(self, name: str, edits: Dict[str, QtWidgets.QLineEdit], radio: QtWidgets.QRadioButton, box: QtWidgets.QGroupBox) -> None:
-        params = {k: e.text().strip() for k, e in edits.items()}
+    def _on_paradigm_toggled(
+        self,
+        checked: bool,
+        name: str,
+        edits: Dict[str, QtWidgets.QWidget],
+        btn: QtWidgets.QPushButton,
+        box: QtWidgets.QGroupBox,
+    ) -> None:
+        if checked:
+            # 其他范式全部关闭
+            for other in self._paradigm_toggle_buttons:
+                if other is not btn and other.isChecked():
+                    other.blockSignals(True)
+                    other.setChecked(False)
+                    other.setText("OFF")
+                    other.blockSignals(False)
+            btn.setText("ON")
+            self._on_paradigm_selected(name, edits, None, box)
+        else:
+            btn.setText("OFF")
+            if self._selected_paradigm == name:
+                self._selected_paradigm = None
+                self._selected_paradigm_params = {}
+                self._paradigm_status.setText("未选择范式")
+                self._trigger_status.setText("当前标签（trigger）：无")
+
+    def _on_paradigm_selected(self, name: str, edits: Dict[str, QtWidgets.QWidget], radio: Optional[QtWidgets.QRadioButton], box: QtWidgets.QGroupBox) -> None:
+        params = {}
+        for k, e in edits.items():
+            if isinstance(e, QtWidgets.QComboBox):
+                params[k] = e.currentText().strip()
+            else:
+                params[k] = e.text().strip()
         self._paradigm_status.setText(f"当前范式：{name}，参数：{params}")
         # 将范式名称作为 trigger 标签提示
         self._trigger_status.setText(f"当前标签（trigger）：{name}")
         self._selected_paradigm = name
         self._selected_paradigm_params = params
-        radio.setChecked(True)
         # 高亮当前卡片，其他恢复默认
         parent = box.parentWidget()
         if parent:
@@ -169,12 +300,17 @@ class TaskExecutionPage(QtWidgets.QWidget):
         container = QtWidgets.QWidget()
         vbox = QtWidgets.QVBoxLayout(container)
         vbox.setContentsMargins(8, 8, 8, 8)
-        vbox.setSpacing(8)
+        vbox.setSpacing(10)
 
-        title = QtWidgets.QLabel("在线端到端演示（模型输出作为反馈）")
-        title.setStyleSheet("font-weight: bold;")
+        title = QtWidgets.QLabel("运行控制 & 反馈")
+        title.setObjectName("sectionTitle")
+        subtitle = QtWidgets.QLabel("选择运行模式与反馈方式，点击“开始实验”启动")
+        subtitle.setObjectName("sectionSub")
         vbox.addWidget(title)
+        vbox.addWidget(subtitle)
 
+        model_group = QtWidgets.QGroupBox("模型配置")
+        model_box = QtWidgets.QVBoxLayout(model_group)
         model_row = QtWidgets.QHBoxLayout()
         model_row.addWidget(QtWidgets.QLabel("选择模型:"))
         self._model_combo = QtWidgets.QComboBox()
@@ -184,26 +320,39 @@ class TaskExecutionPage(QtWidgets.QWidget):
         self._model_param_edit.setPlaceholderText("可选：模型参数，如 key1=1,key2=2 或 JSON")
         model_row.addWidget(self._model_param_edit)
         apply_btn = QtWidgets.QPushButton("加载模型")
+        apply_btn.setProperty("primary", True)
         apply_btn.clicked.connect(self._on_model_selected)
         model_row.addWidget(apply_btn)
         model_row.addStretch()
-        vbox.addLayout(model_row)
+        model_box.addLayout(model_row)
+        vbox.addWidget(model_group)
 
+        run_group = QtWidgets.QGroupBox("运行设置")
+        run_box = QtWidgets.QVBoxLayout(run_group)
         mode_row = QtWidgets.QHBoxLayout()
         mode_row.addWidget(QtWidgets.QLabel("运行模式:"))
         mode_row.addWidget(self._mode_combo)
+        mode_row.addWidget(QtWidgets.QLabel("反馈方式:"))
+        mode_row.addWidget(self._feedback_combo)
         mode_row.addStretch()
-        vbox.addLayout(mode_row)
+        run_box.addLayout(mode_row)
 
         # 启动范式：根据上方选择与配置决定
         run_present_btn = QtWidgets.QPushButton("开始实验")
         run_present_btn.clicked.connect(self._on_run_presentation)
-        vbox.addWidget(self._trigger_com_edit)
-        vbox.addWidget(run_present_btn)
-        vbox.addWidget(self._progress)
+        run_present_btn.setProperty("primary", True)
+        run_box.addWidget(self._trigger_com_edit)
+        run_box.addWidget(run_present_btn)
+        run_box.addWidget(self._progress)
+        vbox.addWidget(run_group)
 
-        vbox.addWidget(self._model_status)
-        vbox.addWidget(self._feedback_status)
+        status_row = QtWidgets.QHBoxLayout()
+        self._model_status.setObjectName("statusBadge")
+        self._feedback_status.setObjectName("statusBadge")
+        status_row.addWidget(self._model_status)
+        status_row.addWidget(self._feedback_status)
+        status_row.addStretch()
+        vbox.addLayout(status_row)
         vbox.addStretch()
         return container
 
@@ -223,6 +372,8 @@ class TaskExecutionPage(QtWidgets.QWidget):
         if self._paradigm_proc and self._paradigm_proc.is_alive():
             QtWidgets.QMessageBox.warning(self, "提示", "已有范式子进程在运行，请先结束或等待完成。")
             return
+        paradigm = self._selected_paradigm
+        params = self._selected_paradigm_params or {}
         # 开始范式前：自动开启采集页的数据保存（若有采集页引用）
         if self._acquisition_page is not None:
             try:
@@ -247,8 +398,6 @@ class TaskExecutionPage(QtWidgets.QWidget):
                     return
             except Exception as e:
                 QtWidgets.QMessageBox.warning(self, "提示", f"自动开始保存数据失败，可手动点击保存按钮。原因：{e}")
-        paradigm = self._selected_paradigm
-        params = self._selected_paradigm_params or {}
         trigger_com = self._trigger_com_edit.text().strip() or None
         mode_text = self._mode_combo.currentText()
         is_acquire_mode = "采集模式" in mode_text
@@ -256,25 +405,95 @@ class TaskExecutionPage(QtWidgets.QWidget):
         kafka_bootstrap = None if is_acquire_mode else self._kafka_bootstrap
         kafka_topic = None if is_acquire_mode else self._kafka_topic
         save_dir_for_trig = self._last_save_dir
+        # 模态检查：SSVEP/RSVP 优先 EEG，若尚未集成 EEG 则允许 EMG 存在时继续；手势需 EMG
+        if paradigm in ["SSVEP", "RSVP"]:
+            try:
+                shm = CreateShm(master=False)
+                eegchs = int(shm.getvalue('eegchs'))
+                emgchs = int(shm.getvalue('emgchs'))
+                if eegchs <= 0 and emgchs <= 0:
+                    QtWidgets.QMessageBox.warning(self, "提示", "未检测到 EEG 或 EMG 通道，请先开启采集后再运行 SSVEP/RSVP。")
+                    return
+            except Exception:
+                # 无法读取共享内存时不再阻塞，假定外部已开启采集
+                pass
+        if paradigm == "手势识别":
+            try:
+                shm = CreateShm(master=False)
+                emgchs = int(shm.getvalue('emgchs'))
+                if emgchs <= 0:
+                    QtWidgets.QMessageBox.warning(self, "提示", "未检测到 EMG 通道，请先开启肌电采集后再运行手势范式。")
+                    return
+            except Exception:
+                QtWidgets.QMessageBox.warning(self, "提示", "无法读取 EMG 采集状态，请确认已开启采集。")
+                return
         try:
             if paradigm == "SSVEP":
-                freq_str = params.get("刺激频率(Hz)", "")
-                freqs = []
-                for seg in freq_str.split(","):
-                    seg = seg.strip()
-                    if not seg:
-                        continue
-                    try:
-                        freqs.append(float(seg))
-                    except ValueError:
-                        pass
+                cycles = int(params.get("轮数", "5") or 5)
+                stim_dur = float(params.get("每刺激时长(s)", "4.0") or 4.0)
                 self._paradigm_proc = self._mp_ctx.Process(
                     target=run_ssvep_worker,
-                    args=(freqs or None, trigger_com, kafka_bootstrap, kafka_topic, paradigm, save_dir_for_trig),
+                    args=(None, trigger_com, kafka_bootstrap, kafka_topic, paradigm, save_dir_for_trig, cycles, stim_dur),
                     daemon=False,
                 )
                 self._paradigm_proc.start()
                 self._running_paradigm = "SSVEP"
+                self._proc_timer.start()
+            elif paradigm == "眼动消除":
+                target_count = int(params.get("目标数量", "10") or 10)
+                dwell_sec = float(params.get("注视阈值(s)", "0.8") or 0.8)
+                layout = (params.get("排列模式", "random") or "random").strip().lower()
+                if layout not in {"random", "grid", "circle", "triangle"}:
+                    layout = "random"
+                exe_path = Path(__file__).resolve().parents[3] / "Lib" / "EyeTracker" / "tobii_4c_app.exe"
+                if not exe_path.exists():
+                    QtWidgets.QMessageBox.warning(self, "眼动仪缺失", f"未找到眼动服务程序: {exe_path}")
+                    return
+                try:
+                    __import__("pygame")
+                except Exception as e:
+                    QtWidgets.QMessageBox.warning(self, "依赖缺失", f"需先安装 pygame：{e}")
+                    return
+                self._paradigm_proc = self._mp_ctx.Process(
+                    target=run_eye_target_worker,
+                    args=(
+                        target_count,
+                        dwell_sec,
+                        layout,
+                        kafka_bootstrap,
+                        kafka_topic,
+                        paradigm,
+                        save_dir_for_trig,
+                    ),
+                    daemon=False,
+                )
+                self._paradigm_proc.start()
+                self._running_paradigm = "眼动消除"
+                self._proc_timer.start()
+            elif paradigm == "眼动四分类":
+                trials = int(params.get("次数", "200") or 200)
+                phase_sec = float(params.get("阶段时长(s)", "3.0") or 3.0)
+                ring_sec = float(params.get("环点时长(s)", "3.0") or 3.0)
+                try:
+                    __import__("psychopy")
+                except Exception as e:
+                    QtWidgets.QMessageBox.warning(self, "依赖缺失", f"需先安装 psychopy：{e}")
+                    return
+                self._paradigm_proc = self._mp_ctx.Process(
+                    target=run_eye_4class_worker,
+                    args=(
+                        trials,
+                        phase_sec,
+                        ring_sec,
+                        kafka_bootstrap,
+                        kafka_topic,
+                        paradigm,
+                        save_dir_for_trig,
+                    ),
+                    daemon=False,
+                )
+                self._paradigm_proc.start()
+                self._running_paradigm = "眼动四分类"
                 self._proc_timer.start()
             elif paradigm == "手势识别":
                 names_raw = params.get("手势名称列表", "")
@@ -313,6 +532,28 @@ class TaskExecutionPage(QtWidgets.QWidget):
                 )
                 self._paradigm_proc.start()
                 self._running_paradigm = "手势识别"
+                self._proc_timer.start()
+            elif paradigm == "RSVP":
+                cycles = int(params.get("轮数", "5") or 5)
+                stim_freq = float(params.get("刺激频率(Hz)", "10") or 10)
+                tar_dir = params.get("target文件夹", str(Path("Lib/EEG/rsvp/images/tar")))
+                nt_dir = params.get("non-target文件夹", str(Path("Lib/EEG/rsvp/images/notar")))
+                self._paradigm_proc = self._mp_ctx.Process(
+                    target=run_rsvp_worker,
+                    args=(
+                        tar_dir,
+                        nt_dir,
+                        cycles,
+                        kafka_bootstrap,
+                        kafka_topic,
+                        paradigm,
+                        save_dir_for_trig,
+                        stim_freq,
+                    ),
+                    daemon=False,
+                )
+                self._paradigm_proc.start()
+                self._running_paradigm = "RSVP"
                 self._proc_timer.start()
             else:
                 QtWidgets.QMessageBox.information(self, "提示", f"{paradigm} 范式暂未实现独立进程运行。")

@@ -24,6 +24,9 @@ from ...core.utils.data_manager import DataManager
 from ...core.utils.butter_filter import ButterFilter
 from ...core.drivers.rda1299 import RDA1299
 from ...core.drivers.eye_tracker import TobiiEyeTracker
+from ...core.drivers.neuracle_eeg import NeuracleEEGClient
+from ...core.drivers.bp_eeg import BPEEGClient
+from ...core.drivers.biosemi_eeg import BiosemiEEGClient
 from ...core.data_pipeline.tsdb_storage import TSDBStorage, TSDBConfig
 from ...core.data_pipeline.kafka_producer import KafkaConfig, KafkaDataProducer
 
@@ -46,7 +49,7 @@ class DeviceConfigDialog(QtWidgets.QDialog):
 
         # 设备类型
         self._type_combo = QtWidgets.QComboBox()
-        self._type_combo.addItems(["自研肌电腕带", "眼动仪"])
+        self._type_combo.addItems(["自研肌电腕带", "眼动仪", "Neuracle脑电", "BP脑电", "Biosemi脑电"])
         self._type_combo.currentIndexChanged.connect(self._on_type_changed)
         form.addRow("设备类型:", self._type_combo)
 
@@ -78,6 +81,31 @@ class DeviceConfigDialog(QtWidgets.QDialog):
         self._baud_label = QtWidgets.QLabel("比特率:")
         form.addRow(self._baud_label, self._baudrate_combo)
 
+        # EEG 通用配置（Neuracle/BP/Biosemi）
+        self._eeg_ip_edit = QtWidgets.QLineEdit()
+        self._eeg_ip_edit.setPlaceholderText("例如 127.0.0.1")
+        self._eeg_ip_edit.setText("127.0.0.1")
+        self._eeg_ip_label = QtWidgets.QLabel("设备IP:")
+        form.addRow(self._eeg_ip_label, self._eeg_ip_edit)
+
+        self._eeg_port_edit = QtWidgets.QLineEdit()
+        self._eeg_port_edit.setPlaceholderText("例如 8712")
+        self._eeg_port_edit.setText("8712")
+        self._eeg_port_label = QtWidgets.QLabel("设备端口:")
+        form.addRow(self._eeg_port_label, self._eeg_port_edit)
+
+        self._eeg_srate_edit = QtWidgets.QLineEdit()
+        self._eeg_srate_edit.setPlaceholderText("例如 1000")
+        self._eeg_srate_edit.setText("1000")
+        self._eeg_srate_label = QtWidgets.QLabel("采样率:")
+        form.addRow(self._eeg_srate_label, self._eeg_srate_edit)
+
+        self._eeg_chs_edit = QtWidgets.QLineEdit()
+        self._eeg_chs_edit.setPlaceholderText("例如 64")
+        self._eeg_chs_edit.setText("64")
+        self._eeg_chs_label = QtWidgets.QLabel("通道数:")
+        form.addRow(self._eeg_chs_label, self._eeg_chs_edit)
+
         layout.addLayout(form)
         layout.addStretch()
 
@@ -97,10 +125,34 @@ class DeviceConfigDialog(QtWidgets.QDialog):
     def _on_type_changed(self, idx: int) -> None:
         """根据设备类型显隐串口参数。"""
         is_emg = idx == 0
+        is_eeg = idx in (2, 3, 4)
         self._port_widget.setVisible(is_emg)
         self._port_label.setVisible(is_emg)
         self._baudrate_combo.setVisible(is_emg)
         self._baud_label.setVisible(is_emg)
+
+        self._eeg_ip_label.setVisible(is_eeg)
+        self._eeg_ip_edit.setVisible(is_eeg)
+        self._eeg_port_label.setVisible(is_eeg)
+        self._eeg_port_edit.setVisible(is_eeg)
+        self._eeg_srate_label.setVisible(is_eeg)
+        self._eeg_srate_edit.setVisible(is_eeg)
+        self._eeg_chs_label.setVisible(is_eeg)
+        self._eeg_chs_edit.setVisible(is_eeg)
+
+        # 设备类型切换时更新默认值
+        if idx == 2:  # Neuracle
+            self._eeg_port_edit.setText("8712")
+            self._eeg_srate_edit.setText("1000")
+            self._eeg_chs_edit.setText("64")
+        elif idx == 3:  # BP
+            self._eeg_port_edit.setText("51244")
+            self._eeg_srate_edit.setText("500")
+            self._eeg_chs_edit.setText("32")
+        elif idx == 4:  # Biosemi
+            self._eeg_port_edit.setText("1111")
+            self._eeg_srate_edit.setText("1024")
+            self._eeg_chs_edit.setText("65")
 
     def _refresh_ports(self) -> None:
         """刷新串口列表。"""
@@ -119,8 +171,28 @@ class DeviceConfigDialog(QtWidgets.QDialog):
 
     def accept(self) -> None:
         """确认配置。"""
-        device_type = "emg_wristband" if self._type_combo.currentIndex() == 0 else "eye_tracker"
-        alias = self._alias_edit.text().strip() or ("自研肌电腕带" if device_type == "emg_wristband" else "眼动仪")
+        idx = self._type_combo.currentIndex()
+        if idx == 0:
+            device_type = "emg_wristband"
+        elif idx == 1:
+            device_type = "eye_tracker"
+        elif idx == 2:
+            device_type = "neuracle_eeg"
+        elif idx == 3:
+            device_type = "bp_eeg"
+        else:
+            device_type = "biosemi_eeg"
+        if device_type == "emg_wristband":
+            alias_default = "自研肌电腕带"
+        elif device_type == "eye_tracker":
+            alias_default = "眼动仪"
+        elif device_type == "bp_eeg":
+            alias_default = "BP脑电"
+        elif device_type == "biosemi_eeg":
+            alias_default = "Biosemi脑电"
+        else:
+            alias_default = "Neuracle脑电"
+        alias = self._alias_edit.text().strip() or alias_default
 
         if device_type == "emg_wristband":
             port = self._port_combo.currentText().strip()
@@ -138,10 +210,35 @@ class DeviceConfigDialog(QtWidgets.QDialog):
                 'baudrate': baudrate,
                 'alias': alias,
             }
-        else:
+        elif device_type == "eye_tracker":
             self._result = {
                 'type': device_type,
                 'alias': alias,
+            }
+        else:
+            dev_ip = self._eeg_ip_edit.text().strip() or "127.0.0.1"
+            try:
+                dev_port = int(self._eeg_port_edit.text().strip() or "8712")
+            except ValueError:
+                QtWidgets.QMessageBox.warning(self, "错误", "无效的设备端口")
+                return
+            try:
+                srate = int(self._eeg_srate_edit.text().strip() or "1000")
+            except ValueError:
+                QtWidgets.QMessageBox.warning(self, "错误", "无效的采样率")
+                return
+            try:
+                chs = int(self._eeg_chs_edit.text().strip() or "64")
+            except ValueError:
+                QtWidgets.QMessageBox.warning(self, "错误", "无效的通道数")
+                return
+            self._result = {
+                'type': device_type,
+                'alias': alias,
+                'dev_ip': dev_ip,
+                'dev_port': dev_port,
+                'srate': srate,
+                'eeg_chs': chs,
             }
         super().accept()
 
@@ -709,6 +806,284 @@ class WavePanel(QtWidgets.QWidget):
         self.shm.release()
 
 
+class EEGPlotWindow(QtWidgets.QMainWindow):
+    """脑电多通道独立显示窗口（用于 Neuracle）。"""
+
+    def __init__(
+        self,
+        title: str,
+        config: dict,
+        srate: int,
+        chs: int,
+        history_seconds: float = 2.5,
+        on_remove=None,
+        parent: Optional[QtWidgets.QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self._config = config
+        self._driver: Optional[NeuracleEEGClient] = None
+        self._kafka_config: Optional[KafkaConfig] = None
+        self._on_remove = on_remove
+        self._srate = max(1, int(srate))
+        self._chs = max(1, int(chs))
+        self._period = history_seconds
+        self._gain = 1.0
+        self._spacing = 100.0
+        self._flttype = 2  # 0-none,1-high,2-band
+        self._filter = ButterFilter()
+        self._filter.reset(
+            srate=self._srate,
+            chs=self._chs,
+            fltparam=[(49, 51), (1, 40), (1, 0), None],
+            eegtype=EEGTYPE,
+        )
+
+        self._dm = DataManager()
+        self._dm.config(self._srate, self._chs, self._period, EEGTYPE)
+
+        central = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(central)
+        layout.setContentsMargins(6, 6, 6, 6)
+        self.setCentralWidget(central)
+
+        ctrl_bar = QtWidgets.QWidget()
+        ctrl_bar.setFixedHeight(48)
+        ctrl_layout = QtWidgets.QHBoxLayout(ctrl_bar)
+        ctrl_layout.setContentsMargins(0, 0, 0, 0)
+        ctrl_layout.setSpacing(8)
+
+        ctrl_layout.addWidget(QtWidgets.QLabel("增益:"))
+        self._gain_spin = QtWidgets.QDoubleSpinBox()
+        self._gain_spin.setRange(0.01, 10.0)
+        self._gain_spin.setSingleStep(0.1)
+        self._gain_spin.setValue(1.0)
+        ctrl_layout.addWidget(self._gain_spin)
+
+        ctrl_layout.addWidget(QtWidgets.QLabel("通道间距:"))
+        self._spacing_spin = QtWidgets.QDoubleSpinBox()
+        self._spacing_spin.setRange(10.0, 500.0)
+        self._spacing_spin.setSingleStep(10.0)
+        self._spacing_spin.setValue(100.0)
+        ctrl_layout.addWidget(self._spacing_spin)
+
+        ctrl_layout.addWidget(QtWidgets.QLabel("滤波:"))
+        self._filter_combo = QtWidgets.QComboBox()
+        self._filter_combo.addItem("无", "none")
+        self._filter_combo.addItem("高通", "highpass")
+        self._filter_combo.addItem("带通", "bandpass")
+        self._filter_combo.setCurrentIndex(2)
+        ctrl_layout.addWidget(self._filter_combo)
+
+        ctrl_layout.addWidget(QtWidgets.QLabel("低截止(Hz):"))
+        self._low_cut_spin = QtWidgets.QDoubleSpinBox()
+        self._low_cut_spin.setRange(0.1, 1000.0)
+        self._low_cut_spin.setSingleStep(0.5)
+        self._low_cut_spin.setValue(1.0)
+        ctrl_layout.addWidget(self._low_cut_spin)
+
+        ctrl_layout.addWidget(QtWidgets.QLabel("高截止(Hz):"))
+        self._high_cut_spin = QtWidgets.QDoubleSpinBox()
+        self._high_cut_spin.setRange(0.1, 2000.0)
+        self._high_cut_spin.setSingleStep(0.5)
+        self._high_cut_spin.setValue(40.0)
+        ctrl_layout.addWidget(self._high_cut_spin)
+
+        ctrl_layout.addStretch()
+
+        self._kafka_publish_btn = QtWidgets.QPushButton("Kafka发布")
+        self._kafka_publish_btn.setCheckable(True)
+        self._kafka_publish_btn.setEnabled(False)
+        self._kafka_publish_btn.setStyleSheet("""
+            QPushButton:checked {
+                background-color: rgb(0, 150, 0);
+                color: white;
+            }
+        """)
+        ctrl_layout.addWidget(self._kafka_publish_btn)
+
+        self._kafka_config_btn = QtWidgets.QPushButton("Kafka配置")
+        ctrl_layout.addWidget(self._kafka_config_btn)
+
+        self._start_btn = QtWidgets.QPushButton("开始采集")
+        self._start_btn.setCheckable(True)
+        self._start_btn.setStyleSheet("""
+            QPushButton:checked {
+                background-color: rgb(223, 4, 4);
+                color: white;
+            }
+        """)
+        ctrl_layout.addWidget(self._start_btn)
+
+        self._remove_btn = QtWidgets.QPushButton("移除设备")
+        ctrl_layout.addWidget(self._remove_btn)
+
+        layout.addWidget(ctrl_bar)
+
+        self._plot = pg.PlotWidget()
+        self._plot.showGrid(True, True)
+        layout.addWidget(self._plot)
+
+        self._curves: List[pg.PlotCurveItem] = []
+        self._init_curves()
+
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self._on_tick)
+        self._timer.start(30)
+
+        self._gain_spin.valueChanged.connect(lambda v: self.set_gain(v))
+        self._spacing_spin.valueChanged.connect(lambda v: self.set_channel_spacing(v))
+        self._filter_combo.currentIndexChanged.connect(lambda _: self._on_filter_changed())
+        self._low_cut_spin.valueChanged.connect(lambda _: self._on_filter_changed())
+        self._high_cut_spin.valueChanged.connect(lambda _: self._on_filter_changed())
+        self._kafka_config_btn.clicked.connect(self._on_kafka_config_clicked)
+        self._kafka_publish_btn.toggled.connect(self._on_kafka_publish_toggled)
+        self._start_btn.toggled.connect(self._on_start_toggled)
+        self._remove_btn.clicked.connect(self._on_remove_clicked)
+
+    def _init_curves(self) -> None:
+        self._curves = []
+        self._plot.clear()
+        self._plot.setYRange(0, self._spacing * self._chs)
+        for idx in range(self._chs):
+            curve = pg.PlotCurveItem(pen=pg.mkPen(color=(20, 20, 20), width=1))
+            self._plot.addItem(curve)
+            curve.setPos(0, idx * self._spacing + 0.5 * self._spacing)
+            self._curves.append(curve)
+
+    def set_gain(self, gain: float) -> None:
+        self._gain = float(gain)
+
+    def set_channel_spacing(self, spacing: float) -> None:
+        self._spacing = float(spacing)
+        self._init_curves()
+
+    def set_filter_type(self, flttype: int, low_cut: float, high_cut: float) -> None:
+        self._flttype = flttype
+        self._filter.reset(
+            srate=self._srate,
+            chs=self._chs,
+            fltparam=[(49, 51), (low_cut, high_cut), (1, 0), None],
+            eegtype=EEGTYPE,
+        )
+
+    def _on_filter_changed(self) -> None:
+        self.set_filter_type(
+            self._filter_combo.currentIndex(),
+            self._low_cut_spin.value(),
+            self._high_cut_spin.value(),
+        )
+
+    def _on_kafka_config_clicked(self) -> None:
+        dialog = KafkaConfigDialog(self)
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            config = dialog.get_config()
+            if config:
+                self._kafka_config = config
+                self._kafka_publish_btn.setEnabled(True)
+                self._kafka_publish_btn.setChecked(True)
+                if self._driver is not None:
+                    self._driver.set_kafka_config(config)
+
+    def _on_kafka_publish_toggled(self, checked: bool) -> None:
+        if checked:
+            if self._kafka_config is None:
+                QtWidgets.QMessageBox.warning(self, "警告", "请先配置Kafka服务器")
+                self._kafka_publish_btn.setChecked(False)
+                return
+            if self._driver is not None:
+                self._driver.set_kafka_config(self._kafka_config)
+            self._kafka_publish_btn.setText("停止发布")
+        else:
+            if self._driver is not None:
+                self._driver.set_kafka_config(None)
+            self._kafka_publish_btn.setText("Kafka发布")
+
+    def _on_start_toggled(self, checked: bool) -> None:
+        if checked:
+            self._start_btn.setText("停止采集")
+            dev_type = self._config.get("type", "neuracle_eeg")
+            common_kwargs = dict(
+                dev_addr=self._config.get('dev_ip', '127.0.0.1'),
+                dev_port=int(self._config.get('dev_port', 8712)),
+                srate=int(self._config.get('srate', 1000)),
+                eeg_chs=int(self._config.get('eeg_chs', 64)),
+                include_trigger=True,
+                kafka_config=self._kafka_config if self._kafka_publish_btn.isChecked() else None,
+            )
+            if dev_type == "bp_eeg":
+                self._driver = BPEEGClient(**common_kwargs)
+            elif dev_type == "biosemi_eeg":
+                self._driver = BiosemiEEGClient(**common_kwargs)
+            else:
+                self._driver = NeuracleEEGClient(**common_kwargs)
+            if not self._driver.connect():
+                QtWidgets.QMessageBox.warning(self, "错误", "脑电设备连接失败")
+                self._start_btn.setChecked(False)
+                self._driver = None
+                return
+            self._driver.start()
+        else:
+            self._start_btn.setText("开始采集")
+            self.stop_driver()
+
+    def _on_remove_clicked(self) -> None:
+        self.stop_driver()
+        if callable(self._on_remove):
+            self._on_remove()
+        self.close()
+
+    def _on_tick(self) -> None:
+        if self._driver is None:
+            return
+        blocks = self._driver.pop_data()
+        if not blocks:
+            return
+        for block in blocks:
+            if self._filter is not None:
+                try:
+                    self._filter.update(block)
+                    if self._flttype == 0:
+                        data = self._filter.rawdata
+                    elif self._flttype == 1:
+                        data = self._filter.hdata
+                    else:
+                        data = self._filter.bdata
+                except Exception:
+                    data = block
+            else:
+                data = block
+            self._dm.update(data)
+
+        if self._dm.data is None:
+            return
+        x_vals = np.linspace(
+            -self._period,
+            0.0,
+            self._dm.data.shape[1],
+        )
+        for idx, curve in enumerate(self._curves):
+            if idx >= self._dm.data.shape[0]:
+                break
+            curve.setData(x_vals, self._dm.data[idx, :] * self._gain)
+
+    def closeEvent(self, event) -> None:  # pragma: no cover
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+        self.stop_driver()
+        super().closeEvent(event)
+
+    def stop_driver(self) -> None:
+        if self._driver is not None:
+            try:
+                self._driver.stop()
+            except Exception:
+                pass
+        self._driver = None
+
+
 class DataAcquisitionPage(QtWidgets.QWidget):
     """数据采集页面。"""
 
@@ -801,11 +1176,15 @@ class DataAcquisitionPage(QtWidgets.QWidget):
 
         # 设备列表
         self._eye_devices: List[EyeTrackerDevice] = []
+        self._eeg_windows: List[EEGPlotWindow] = []
         # 用于按类型分配纵向空间的权重
         self._device_type_weight = {
             "emg_wristband": 10,
             "eye_tracker": 3,
             "eeg": 60,
+            "neuracle_eeg": 60,
+            "bp_eeg": 60,
+            "biosemi_eeg": 60,
         }
         # 触发提示绑定到主绘图（第一个设备波形面板出现后添加）
         self._trigger_attached = False
@@ -833,6 +1212,11 @@ class DataAcquisitionPage(QtWidgets.QWidget):
             return
         
         device_type = config.get('type', 'emg_wristband')
+        if device_type in {"neuracle_eeg", "bp_eeg", "biosemi_eeg"}:
+            for info in self._devices.values():
+                if info.get("config", {}).get("type") == device_type:
+                    QtWidgets.QMessageBox.warning(self, "提示", "同类型脑电设备只能连接一个。")
+                    return
 
         # 眼动仪走设备模式：添加后再显示绘图区域
         if device_type == "eye_tracker":
@@ -843,6 +1227,51 @@ class DataAcquisitionPage(QtWidgets.QWidget):
             self._device_layout.insertWidget(0, device)
             self._apply_device_stretch()
             self._status_label.setText(f"已添加设备: {title}")
+            return
+
+        if device_type in {"neuracle_eeg", "bp_eeg", "biosemi_eeg"}:
+            device_key = f"{device_type}_{len(self._devices)}"
+            title = config.get('alias', '脑电设备')
+
+            device_widget = QtWidgets.QWidget()
+            device_widget.setProperty("device_type", device_type)
+            device_layout = QtWidgets.QVBoxLayout(device_widget)
+            device_layout.setContentsMargins(8, 8, 8, 8)
+            device_layout.setSpacing(8)
+
+            # 不显示提示，主界面仅保留肌电与眼动
+
+            def _on_remove_window():
+                self._remove_device(device_key)
+
+            self._devices[device_key] = {
+                'rda': None,
+                'panel': None,
+                'config': config,
+                'widget': device_widget,
+                'is_collecting': False,
+                'driver': None,
+                'eeg_window': None,
+            }
+
+            self._device_layout.insertWidget(0, device_widget)
+            self._apply_device_stretch()
+            self._status_label.setText(f"已添加设备: {title}")
+            eeg_window = EEGPlotWindow(
+                title,
+                config,
+                int(config.get('srate', 1000)),
+                int(config.get('eeg_chs', 64)),
+                on_remove=_on_remove_window,
+                parent=self,
+            )
+            try:
+                eeg_window.resize(self.window().size())
+            except Exception:
+                pass
+            eeg_window.show()
+            self._eeg_windows.append(eeg_window)
+            self._devices[device_key]['eeg_window'] = eeg_window
             return
 
         # EMG设备
@@ -1142,6 +1571,28 @@ class DataAcquisitionPage(QtWidgets.QWidget):
             return
         
         device_info = self._devices[device_key]
+        if device_info.get('config', {}).get('type') in {"neuracle_eeg", "bp_eeg", "biosemi_eeg"}:
+            try:
+                driver = device_info.get('driver')
+                if driver is not None:
+                    driver.stop()
+            except Exception:
+                pass
+            try:
+                eeg_window = device_info.get('eeg_window')
+                if eeg_window is not None:
+                    eeg_window.close()
+                    if eeg_window in self._eeg_windows:
+                        self._eeg_windows.remove(eeg_window)
+            except Exception:
+                pass
+            widget = device_info['widget']
+            self._device_layout.removeWidget(widget)
+            widget.deleteLater()
+            self._apply_device_stretch()
+            del self._devices[device_key]
+            return
+
         rda = device_info.get('rda')
         
         # 先停止数据流，清理回调（防止回调访问已删除的控件）
@@ -1618,6 +2069,13 @@ class DataAcquisitionPage(QtWidgets.QWidget):
         # 关闭眼动设备
         for dev in list(self._eye_devices):
             self._remove_eye_device(dev)
+
+        for win in list(self._eeg_windows):
+            try:
+                win.close()
+            except Exception:
+                pass
+        self._eeg_windows = []
 
         self._stop_trigger_udp_listener()
 

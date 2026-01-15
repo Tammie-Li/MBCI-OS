@@ -26,7 +26,7 @@ def main():
     window = MainWindow()
     window.show()
     return app.exec_()
-
+   
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
